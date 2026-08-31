@@ -4,4 +4,5 @@ __pycache__/
 venv/
 .env
 .idea/
-
+scraper/cache/
+.pytest_cache/
