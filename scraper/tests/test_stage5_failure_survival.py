@@ -165,6 +165,21 @@ def test_run_report_exists_and_contains_required_fields(temp_output_dir, monkeyp
     assert required.issubset(report)
 
 
+def test_runreport_json_alias_is_written(temp_output_dir, monkeypatch):
+    urls = [f"https://books.toscrape.com/catalogue/book-{i}_index.html" for i in range(1, 5)]
+
+    def fake_fetch_with_retry(url, *, stats=None):
+        return _build_valid_html(int(url.rsplit("-", 1)[1].split("_", 1)[0]))
+
+    monkeypatch.setattr(main, "fetch_with_retry", fake_fetch_with_retry)
+    main.run_scraper(urls)
+
+    report_path = temp_output_dir / "runreport.json"
+    assert report_path.exists()
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["valid_records"] == 4
+
+
 def test_stage4_successful_run_keeps_60_valid_records(temp_output_dir, monkeypatch):
     urls = [f"https://books.toscrape.com/catalogue/book-{i}_index.html" for i in range(1, 61)]
 

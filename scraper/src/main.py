@@ -25,7 +25,8 @@ CACHE_FILE = CACHE_DIR / "catalogue-page-1.html"
 OUTPUT_DIR = Path(__file__).parent.parent / "output"
 BOOKS_FILE = OUTPUT_DIR / "books.json"
 ERRORS_FILE = OUTPUT_DIR / "errors.json"
-RUN_REPORT_FILE = OUTPUT_DIR / "run-report.json"
+RUN_REPORT_FILE = OUTPUT_DIR / "runreport.json"
+LEGACY_RUN_REPORT_FILE = OUTPUT_DIR / "run-report.json"
 
 
 # ============================================================================
@@ -510,10 +511,18 @@ def process_book(product_url: str, *, source_page: str = TARGET_URL, stats: dict
 
 
 def write_run_report(report: dict, report_path: str | Path | None = None) -> None:
-    """Persist the run summary to disk as valid JSON."""
-    resolved_path = Path(report_path) if report_path is not None else OUTPUT_DIR / "run-report.json"
-    resolved_path.parent.mkdir(parents=True, exist_ok=True)
-    resolved_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    """Persist the run summary to disk as valid JSON in both canonical and legacy filenames."""
+    default_path = Path(report_path) if report_path is not None else RUN_REPORT_FILE
+    target_paths = [default_path]
+    if default_path.name == "runreport.json":
+        target_paths.append(LEGACY_RUN_REPORT_FILE)
+    elif default_path.name == "run-report.json":
+        target_paths.append(RUN_REPORT_FILE)
+
+    for path in dict.fromkeys(target_paths):
+        resolved_path = Path(path)
+        resolved_path.parent.mkdir(parents=True, exist_ok=True)
+        resolved_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def run_scraper(urls: list[str] | None = None) -> dict:
@@ -562,7 +571,7 @@ def run_scraper(urls: list[str] | None = None) -> dict:
         "invalid_records": invalid_records,
         "failed_pages": failed_pages,
     }
-    write_run_report(report, OUTPUT_DIR / "run-report.json")
+    write_run_report(report, RUN_REPORT_FILE)
     return report
 
 
@@ -622,7 +631,7 @@ def main() -> None:
         "invalid_records": len(errors),
         "failed_pages": 0,
     }
-    write_run_report(report)
+    write_run_report(report, RUN_REPORT_FILE)
 
     # Print checkpoint summary
     print(f"valid_records={len(valid_books)}")

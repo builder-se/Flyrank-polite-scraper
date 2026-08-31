@@ -1,8 +1,15 @@
 __pycache__/
+**/__pycache__/
 *.pyc
+**/*.pyc
 .venv/
 venv/
 .env
+.env.*
 .idea/
-scraper/cache/
+.scrapy/
 .pytest_cache/
+**/.pytest_cache/
+scraper/cache/
+**/cache/
+*.log
