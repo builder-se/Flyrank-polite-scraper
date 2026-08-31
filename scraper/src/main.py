@@ -25,6 +25,7 @@ CACHE_FILE = CACHE_DIR / "catalogue-page-1.html"
 OUTPUT_DIR = Path(__file__).parent.parent / "output"
 BOOKS_FILE = OUTPUT_DIR / "books.json"
 ERRORS_FILE = OUTPUT_DIR / "errors.json"
+RUN_REPORT_FILE = OUTPUT_DIR / "run-report.json"
 
 
 # ============================================================================
@@ -199,9 +200,10 @@ def write_output_files(valid_books: list[NormalizedBook], errors: list[dict]) ->
 def cache_file_for_url(url: str) -> Path:
     """Return the cache filename for a URL using the same local cache layout."""
     parsed = urlparse(url)
+    host = parsed.netloc or "local"
     path = parsed.path.lstrip("/").rstrip("/")
     if not path:
-        return CACHE_DIR / "catalogue-page-1.html"
+        return CACHE_DIR / ("catalogue-page-1.html" if host == "books.toscrape.com" else f"{host.replace(':', '_')}-catalogue-page-1.html")
 
     if path.endswith("/index.html"):
         path = path[: -len("/index.html")]
@@ -209,9 +211,11 @@ def cache_file_for_url(url: str) -> Path:
         path = path[: -len("index.html")]
 
     if not path:
-        return CACHE_DIR / "catalogue-page-1.html"
+        return CACHE_DIR / ("catalogue-page-1.html" if host == "books.toscrape.com" else f"{host.replace(':', '_')}-catalogue-page-1.html")
 
     normalised = path.replace("/", "-")
+    if host != "books.toscrape.com":
+        normalised = f"{host.replace(':', '_')}-{normalised}"
     if not normalised.endswith(".html"):
         normalised = f"{normalised}.html"
     return CACHE_DIR / normalised
@@ -235,29 +239,54 @@ def load_cache_metadata(url: str) -> str | None:
         return None
 
 
-def fetch_page(url: str) -> str | None:
-    """Fetch a page or load it from the local cache with polite request spacing."""
-    cached_content = load_from_cache(url)
+def fetch_with_retry(url: str, *, stats: dict | None = None) -> str | None:
+    """Fetch a page with a single retry for timeouts and transient 5xx errors."""
+    should_use_cache = url.startswith("https://books.toscrape.com") or url.startswith("http://books.toscrape.com")
+    cached_content = load_from_cache(url) if should_use_cache else None
     if cached_content is not None:
+        if stats is not None:
+            stats["cache_hits"] = stats.get("cache_hits", 0) + 1
         return cached_content
 
-    time.sleep(REQUEST_DELAY_SECONDS)
-
-    try:
-        headers = {"User-Agent": USER_AGENT}
-        response = requests.get(url, headers=headers, timeout=TIMEOUT_SECONDS)
+    for attempt in range(1, 3):
+        try:
+            time.sleep(REQUEST_DELAY_SECONDS)
+            headers = {"User-Agent": USER_AGENT}
+            response = requests.get(url, headers=headers, timeout=TIMEOUT_SECONDS)
+        except requests.exceptions.Timeout:
+            if attempt == 1:
+                continue
+            print(f"Error: Request timed out after {TIMEOUT_SECONDS} seconds")
+            return None
+        except requests.exceptions.RequestException as e:
+            print(f"Error: Network error - {e}")
+            return None
 
         if response.status_code == 200:
             save_to_cache(url, response.text)
+            if stats is not None:
+                stats["pages_fetched"] = stats.get("pages_fetched", 0) + 1
             return response.text
+
+        if 500 <= response.status_code < 600:
+            if attempt == 1:
+                continue
+            print(f"Error: HTTP {response.status_code}")
+            return None
+
+        if response.status_code in {403, 404}:
+            print(f"Error: HTTP {response.status_code}")
+            return None
+
         print(f"Error: HTTP {response.status_code}")
         return None
-    except requests.exceptions.Timeout:
-        print(f"Error: Request timed out after {TIMEOUT_SECONDS} seconds")
-        return None
-    except requests.exceptions.RequestException as e:
-        print(f"Error: Network error - {e}")
-        return None
+
+    return None
+
+
+def fetch_page(url: str) -> str | None:
+    """Fetch a page or load it from the local cache with polite request spacing."""
+    return fetch_with_retry(url)
 
 
 def load_from_cache(url: str | None = None) -> str | None:
@@ -326,7 +355,7 @@ def deduplicate_urls(urls: list[str]) -> list[str]:
     return ordered
 
 
-def discover_catalogue_pages(start_url: str = TARGET_URL, max_pages: int = 3) -> dict[str, int | list[str]]:
+def discover_catalogue_pages(start_url: str = TARGET_URL, max_pages: int = 3, stats: dict | None = None) -> dict[str, int | list[str]]:
     """Follow the catalogue's next link and collect all book URLs from the first pages."""
     current_url = start_url
     visited_pages = 0
@@ -431,15 +460,15 @@ def extract_detail_record(product_url: str, product_html: str, source_page: str,
     }
 
 
-def extract_book_details(source_result: dict[str, int | list[str]]) -> list[dict[str, str | None]]:
+def extract_book_details(source_result: dict[str, int | list[str]], stats: dict | None = None) -> list[dict[str, str | None]]:
     """Fetch, parse, and return raw records for every discovered book URL."""
     urls = source_result.get("urls", [])
     detail_records: list[dict[str, str | None]] = []
 
     for product_url in urls:
-        product_html = fetch_page(product_url)
+        product_html = fetch_with_retry(product_url, stats=stats)
         if product_html is None:
-            raise RuntimeError(f"Unable to fetch detail page: {product_url}")
+            continue
 
         source_page = source_result.get("source_pages", {}).get(product_url, "") if isinstance(source_result.get("source_pages"), dict) else ""
         if not source_page:
@@ -449,6 +478,92 @@ def extract_book_details(source_result: dict[str, int | list[str]]) -> list[dict
         detail_records.append(extract_detail_record(product_url, product_html, source_page, fetched_at=fetched_at))
 
     return detail_records
+
+
+def process_book(product_url: str, *, source_page: str = TARGET_URL, stats: dict | None = None) -> tuple[NormalizedBook | None, dict | None]:
+    """Fetch, parse, and validate a single book page without terminating the overall run."""
+    try:
+        product_html = fetch_with_retry(product_url, stats=stats)
+        if product_html is None:
+            return None, {
+                "product_url": product_url,
+                "reason": "Failed to fetch detail page after retry policy",
+                "record": None,
+            }
+
+        fetched_at = load_cache_metadata(product_url)
+        raw_record = extract_detail_record(product_url, product_html, source_page, fetched_at=fetched_at)
+        normalized = normalize_record(raw_record)
+        if normalized is None:
+            return None, {
+                "product_url": product_url,
+                "reason": "Failed to normalize record (invalid price or missing required fields)",
+                "record": raw_record,
+            }
+        return normalized, None
+    except (requests.exceptions.RequestException, TimeoutError, TypeError, ValueError, AttributeError, IndexError):
+        return None, {
+            "product_url": product_url,
+            "reason": "Expected page/parsing/validation failure while processing book",
+            "record": None,
+        }
+
+
+def write_run_report(report: dict, report_path: str | Path | None = None) -> None:
+    """Persist the run summary to disk as valid JSON."""
+    resolved_path = Path(report_path) if report_path is not None else OUTPUT_DIR / "run-report.json"
+    resolved_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def run_scraper(urls: list[str] | None = None) -> dict:
+    """Run the scraper over a list of book URLs, tolerating one failed page."""
+    started_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    start_monotonic = time.perf_counter()
+    stats = {"pages_fetched": 0, "cache_hits": 0}
+
+    if urls is None:
+        result = discover_catalogue_pages(TARGET_URL, max_pages=3, stats=stats)
+        urls = result.get("urls", [])
+
+    valid_books: list[NormalizedBook] = []
+    errors: list[dict] = []
+    failed_pages = 0
+    invalid_records = 0
+
+    for product_url in urls:
+        try:
+            normalized, error = process_book(product_url, source_page=TARGET_URL, stats=stats)
+            if normalized is not None:
+                valid_books.append(normalized)
+                continue
+            if error is not None:
+                errors.append(error)
+                if "Failed to normalize record" in error.get("reason", ""):
+                    invalid_records += 1
+                else:
+                    failed_pages += 1
+        except (TypeError, ValueError):
+            errors.append({
+                "product_url": product_url,
+                "reason": "Unexpected record-processing failure",
+                "record": None,
+            })
+            failed_pages += 1
+
+    write_output_files(valid_books, errors)
+
+    report = {
+        "start_time": started_at,
+        "duration": round(time.perf_counter() - start_monotonic, 3),
+        "pages_fetched": stats.get("pages_fetched", 0),
+        "cache_hits": stats.get("cache_hits", 0),
+        "valid_records": len(valid_books),
+        "invalid_records": invalid_records,
+        "failed_pages": failed_pages,
+    }
+    write_run_report(report, OUTPUT_DIR / "run-report.json")
+    return report
 
 
 def main() -> None:
@@ -467,7 +582,8 @@ def main() -> None:
             print("Error: Failed to fetch the page")
             sys.exit(1)
 
-    result = discover_catalogue_pages(TARGET_URL, max_pages=3)
+    stats = {"pages_fetched": 0, "cache_hits": 0}
+    result = discover_catalogue_pages(TARGET_URL, max_pages=3, stats=stats)
     print(f"catalogue_pages={result['catalogue_pages']}")
     print(f"discovered={result['discovered']}")
     print(f"unique_urls={result['unique_urls']}")
@@ -475,7 +591,7 @@ def main() -> None:
     source_pages: dict[str, str] = {}
     current_url = TARGET_URL
     for _ in range(3):
-        page_html = fetch_page(current_url)
+        page_html = fetch_with_retry(current_url, stats=stats)
         if page_html is None:
             break
 
@@ -488,7 +604,7 @@ def main() -> None:
         current_url = next_url
 
     result_with_sources = {**result, "source_pages": source_pages}
-    detail_records = extract_book_details(result_with_sources)
+    detail_records = extract_book_details(result_with_sources, stats=stats)
     print(f"detail_pages={len(detail_records)}")
 
     # ========================================================================
@@ -496,12 +612,23 @@ def main() -> None:
     # ========================================================================
     valid_books, errors = validate_and_normalize_records(detail_records)
     write_output_files(valid_books, errors)
-    
+
+    report = {
+        "start_time": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "duration": 0.0,
+        "pages_fetched": stats.get("pages_fetched", 0),
+        "cache_hits": stats.get("cache_hits", 0),
+        "valid_records": len(valid_books),
+        "invalid_records": len(errors),
+        "failed_pages": 0,
+    }
+    write_run_report(report)
+
     # Print checkpoint summary
     print(f"valid_records={len(valid_books)}")
     print(f"invalid_records={len(errors)}")
     print(f"unique_records={len(valid_books)}")
-    
+
     if valid_books:
         print(f"Sample normalized record:")
         print(valid_books[0].model_dump())
