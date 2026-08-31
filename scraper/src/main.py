@@ -1,4 +1,5 @@
 import json
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -6,6 +7,7 @@ from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
+from pydantic import BaseModel, Field, HttpUrl, field_validator
 
 try:
     import requests
@@ -20,6 +22,178 @@ REQUEST_DELAY_SECONDS = 0.5
 TARGET_URL = "https://books.toscrape.com/"
 CACHE_DIR = Path(__file__).parent.parent / "cache"
 CACHE_FILE = CACHE_DIR / "catalogue-page-1.html"
+OUTPUT_DIR = Path(__file__).parent.parent / "output"
+BOOKS_FILE = OUTPUT_DIR / "books.json"
+ERRORS_FILE = OUTPUT_DIR / "errors.json"
+
+
+# ============================================================================
+# Stage 4: Pydantic Schema and Validation
+# ============================================================================
+
+
+class NormalizedBook(BaseModel):
+    """Validated, normalized book record with canonical URL identity."""
+
+    title: str
+    product_url: str
+    price_text: str
+    price_gbp: float
+    availability_text: str | None = None
+    rating_text: str | None = None
+    description: str | None = None
+    source_page: str
+    fetched_at: str
+
+    @field_validator("product_url")
+    @classmethod
+    def validate_https_url(cls, v: str) -> str:
+        """Ensure product_url starts with https://"""
+        if not v.startswith("https://"):
+            raise ValueError("product_url must start with https://")
+        return v
+
+
+class InvalidRecord(BaseModel):
+    """Record of an invalid or unparseable book entry."""
+
+    product_url: str | None = None
+    reason: str
+    record: dict | None = None
+
+
+def normalize_price(price_text: str) -> float | None:
+    """
+    Parse price_text like '£51.77' and return a numeric float value.
+    
+    Handles:
+    - Currency prefix (£, $, €, ¥, ₹, and mojibake variants)
+    - Decimal notation
+    - Whitespace
+    - Multiple encoding issues
+    
+    Returns None if parsing fails.
+    """
+    if not price_text:
+        return None
+    
+    # Extract all digits and dots/commas using regex
+    # This is more robust than trying to list all currency symbols
+    cleaned = price_text.strip()
+    
+    # Try to extract a number pattern: optional minus, digits, optional decimal
+    match = re.search(r'-?\d+[.,]\d+|-?\d+', cleaned)
+    if not match:
+        return None
+    
+    number_str = match.group(0).replace(',', '.')  # Handle comma decimals
+    
+    try:
+        return float(number_str)
+    except (ValueError, TypeError):
+        return None
+
+
+def normalize_record(raw_record: dict[str, str | None]) -> NormalizedBook | None:
+    """
+    Normalize a raw Stage 3 record into a validated NormalizedBook.
+    
+    Returns the NormalizedBook on success, None on failure.
+    Caller is responsible for error handling.
+    """
+    try:
+        product_url = raw_record.get("product_url")
+        price_text = raw_record.get("price_text")
+        
+        if not product_url:
+            return None
+        
+        if not price_text:
+            return None
+        
+        price_gbp = normalize_price(price_text)
+        if price_gbp is None:
+            return None
+        
+        normalized = NormalizedBook(
+            title=raw_record.get("title") or "Untitled",
+            product_url=product_url,
+            price_text=price_text,
+            price_gbp=price_gbp,
+            availability_text=raw_record.get("availability_text"),
+            rating_text=raw_record.get("rating_text"),
+            description=raw_record.get("description"),
+            source_page=raw_record.get("source_page") or "unknown",
+            fetched_at=raw_record.get("fetched_at") or datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        )
+        return normalized
+    except Exception:
+        return None
+
+
+def validate_and_normalize_records(
+    raw_records: list[dict[str, str | None]],
+) -> tuple[list[NormalizedBook], list[dict]]:
+    """
+    Process all raw Stage 3 records through normalization and validation.
+    
+    Returns:
+      (valid_books, errors)
+    
+    - valid_books: List of NormalizedBook objects (deduplicated by product_url)
+    - errors: List of error dicts with product_url, reason, and optional record
+    """
+    valid_books: list[NormalizedBook] = []
+    errors: list[dict] = []
+    seen_urls: set[str] = set()
+    
+    for raw_record in raw_records:
+        product_url = raw_record.get("product_url")
+        
+        # Check for duplicates
+        if product_url and product_url in seen_urls:
+            errors.append({
+                "product_url": product_url,
+                "reason": "Duplicate product_url (deduplicated)",
+                "record": raw_record,
+            })
+            continue
+        
+        # Normalize
+        normalized = normalize_record(raw_record)
+        if normalized is None:
+            errors.append({
+                "product_url": product_url,
+                "reason": "Failed to normalize record (invalid price or missing required fields)",
+                "record": raw_record,
+            })
+            continue
+        
+        # Pydantic validation happens in NormalizedBook.__init__
+        # If we get here, the record is valid
+        if product_url:
+            seen_urls.add(product_url)
+        valid_books.append(normalized)
+    
+    return valid_books, errors
+
+
+def write_output_files(valid_books: list[NormalizedBook], errors: list[dict]) -> None:
+    """Write validated books and errors to output JSON files."""
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    
+    # Write books.json
+    books_data = [book.model_dump(mode="python") for book in valid_books]
+    BOOKS_FILE.write_text(
+        json.dumps(books_data, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    
+    # Write errors.json
+    ERRORS_FILE.write_text(
+        json.dumps(errors, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
 
 
 def cache_file_for_url(url: str) -> Path:
@@ -316,8 +490,21 @@ def main() -> None:
     result_with_sources = {**result, "source_pages": source_pages}
     detail_records = extract_book_details(result_with_sources)
     print(f"detail_pages={len(detail_records)}")
-    if detail_records:
-        print(detail_records[0])
+
+    # ========================================================================
+    # Stage 4: Normalize and Validate Records
+    # ========================================================================
+    valid_books, errors = validate_and_normalize_records(detail_records)
+    write_output_files(valid_books, errors)
+    
+    # Print checkpoint summary
+    print(f"valid_records={len(valid_books)}")
+    print(f"invalid_records={len(errors)}")
+    print(f"unique_records={len(valid_books)}")
+    
+    if valid_books:
+        print(f"Sample normalized record:")
+        print(valid_books[0].model_dump())
 
 
 if __name__ == "__main__":
