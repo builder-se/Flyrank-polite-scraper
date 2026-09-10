@@ -1,0 +1,1 @@
+"""Application package for the polite Books to Scrape scraper."""

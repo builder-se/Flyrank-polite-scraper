@@ -512,12 +512,12 @@ def process_book(product_url: str, *, source_page: str = TARGET_URL, stats: dict
 
 def write_run_report(report: dict, report_path: str | Path | None = None) -> None:
     """Persist the run summary to disk as valid JSON in both canonical and legacy filenames."""
-    default_path = Path(report_path) if report_path is not None else RUN_REPORT_FILE
+    default_path = Path(report_path) if report_path is not None else OUTPUT_DIR / "runreport.json"
     target_paths = [default_path]
     if default_path.name == "runreport.json":
-        target_paths.append(LEGACY_RUN_REPORT_FILE)
+        target_paths.append(OUTPUT_DIR / "run-report.json")
     elif default_path.name == "run-report.json":
-        target_paths.append(RUN_REPORT_FILE)
+        target_paths.append(OUTPUT_DIR / "runreport.json")
 
     for path in dict.fromkeys(target_paths):
         resolved_path = Path(path)
@@ -571,7 +571,7 @@ def run_scraper(urls: list[str] | None = None) -> dict:
         "invalid_records": invalid_records,
         "failed_pages": failed_pages,
     }
-    write_run_report(report, RUN_REPORT_FILE)
+    write_run_report(report, OUTPUT_DIR / "runreport.json")
     return report
 
 

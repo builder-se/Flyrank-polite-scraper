@@ -10,6 +10,7 @@ venv/
 .scrapy/
 .pytest_cache/
 **/.pytest_cache/
+cache/
 scraper/cache/
 **/cache/
 *.log

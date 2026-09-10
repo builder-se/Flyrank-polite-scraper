@@ -1,43 +1,142 @@
 # FlyRank Polite Scraper
 
-## Target classification
+A small, cache-aware Python scraper for the public [Books to Scrape](https://books.toscrape.com/) practice website.
 
-- Target: Books to Scrape
-- Why it is appropriate: Books to Scrape is a sandbox intentionally designed for scraping practice.
-- Scope: This project processes the first 3 catalogue pages only.
-- Data collected: title, price, rating, availability, description, source page, and product URL.
-- robots.txt result: checking https://books.toscrape.com/robots.txt returned no robots file, which does not grant permission to scrape.
+The scraper discovers books from up to three catalogue pages, fetches each detail page, extracts the required fields, validates and normalizes the records with Pydantic, and writes JSON output for downstream use.
 
-This project is intended for a controlled learning environment only, and I would not reuse it on another site without checking that site’s rules and terms first.
+This project is intended for the Books to Scrape learning environment only. Before using any scraper on another website, review its terms, robots policy, and access requirements.
 
-## Lane
+## Stage 0 classification and lane
 
-This project uses the Python lane.
+- **Target classification:** public, static HTML catalogue with publicly visible book metadata.
+- **Lane:** polite public-web data collection for a learning assignment, not a general-purpose crawler.
+
+The repository includes JSON evidence from a successful run. Cached HTML is local working data and is excluded from Git.
+
+## Quick start
+
+From the repository root, run the following in PowerShell:
+
+```powershell
+Set-Location scraper
+python -m venv .venv
+& .\.venv\Scripts\python.exe -m pip install --upgrade pip
+& .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+& .\.venv\Scripts\python.exe src\main.py
+```
+
+The first run may use the network. Later runs reuse cached pages when available.
+
+## Requirements
+
+- Python 3.10 or newer
+- PowerShell on Windows, or an equivalent shell on another operating system
+- Internet access when a required page is not already cached
+
+The project uses these Python packages:
+
+- `requests` for HTTP requests
+- `beautifulsoup4` for HTML parsing
+- `pydantic` for record validation
+- `pytest` for automated tests
 
 ## Installation
 
-From the repository root, install the project dependencies with:
+Run these commands from the repository root:
 
 ```powershell
-cd scraper; python -m venv .venv; .\.venv\Scripts\python -m pip install -r requirements.txt
+Set-Location scraper
+python -m venv .venv
+& .\.venv\Scripts\python.exe -m pip install --upgrade pip
+& .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-## Run command
+Use the virtual-environment interpreter for all commands. This avoids accidentally using a different Python installation.
 
-This is the single copy-pasteable command that runs the scraper from a fresh clone:
+## Running the scraper
+
+Run the normal scraper from the `scraper` directory:
 
 ```powershell
-cd scraper; python -m venv .venv; .\.venv\Scripts\python -m pip install -r requirements.txt; .\.venv\Scripts\python src/main.py
+& .\.venv\Scripts\python.exe src\main.py
 ```
 
-This produces the expected JSON outputs in the `output/` directory:
+The command prints discovery and validation checkpoints, including:
 
-- `output/books.json`
-- `output/runreport.json`
+- Number of catalogue pages visited
+- Number of discovered and unique product URLs
+- Number of detail pages processed
+- Number of valid and invalid records
 
-## Record schema
+### One copy-pasteable run
 
-The scraper normalizes each valid book into this record schema:
+From the repository root, this complete PowerShell block installs dependencies, runs the scraper, and runs the tests:
+
+```powershell
+Set-Location scraper; python -m venv .venv; & .\.venv\Scripts\python.exe -m pip install -r requirements.txt; & .\.venv\Scripts\python.exe src\main.py; & .\.venv\Scripts\python.exe -m pytest
+```
+
+### Run with existing cache
+
+No extra option is needed. Cached HTML is read before a network request, so rerunning the command is usually faster and avoids repeated requests.
+
+### Run from a clean cache
+
+To force a fresh network run, remove the generated cache and output files, then run the scraper again:
+
+```powershell
+Remove-Item -Recurse -Force cache\*, output\*
+& .\.venv\Scripts\python.exe src\main.py
+```
+
+The directories are recreated automatically. Only remove these folders when you are sure you do not need the existing generated data.
+
+## Testing
+
+Run the complete automated test suite from the `scraper` directory:
+
+```powershell
+& .\.venv\Scripts\python.exe -m pytest
+```
+
+Run with more detailed output:
+
+```powershell
+& .\.venv\Scripts\python.exe -m pytest -v
+```
+
+Run a specific test module:
+
+```powershell
+& .\.venv\Scripts\python.exe -m pytest tests\test_stage4_validation.py
+```
+
+The tests cover catalogue discovery, HTML extraction, price and record validation, retry behavior, cache handling, report generation, and survival of an individual failed detail page.
+
+## Stage 5 checkpoint
+
+The standalone checkpoint verifies that one failed detail page does not discard successful records:
+
+```powershell
+& .\.venv\Scripts\python.exe stage5_check.py
+```
+
+## Generated files
+
+After a run, the scraper writes these files under `output/`:
+
+| File | Purpose |
+| --- | --- |
+| `books.json` | Validated and normalized book records |
+| `errors.json` | Records that failed fetching or normalization, with reasons |
+| `runreport.json` | Canonical run summary |
+| `run-report.json` | Backward-compatible alias of the run summary |
+
+Cached pages and their fetch timestamps are stored under `cache/` as HTML and `.meta.json` files.
+
+## Output record schema
+
+Each valid entry in `books.json` has this shape:
 
 ```json
 {
@@ -45,43 +144,33 @@ The scraper normalizes each valid book into this record schema:
   "product_url": "https://...",
   "price_text": "string",
   "price_gbp": 0.0,
-  "availability_text": "string | null",
-  "rating_text": "string | null",
-  "description": "string | null",
+  "availability_text": "string or null",
+  "rating_text": "string or null",
+  "description": "string or null",
   "source_page": "string",
   "fetched_at": "ISO-8601 UTC timestamp string"
 }
 ```
 
-Meaning of each field:
+`price_text` preserves the scraped value, while `price_gbp` contains its numeric value. Records are deduplicated by `product_url`. Invalid or duplicate records are preserved in `errors.json` with diagnostic information.
 
-- `title`: book title as displayed on the product page.
-- `product_url`: canonical HTTPS URL of the product detail page.
-- `price_text`: raw price text scraped from the page before numeric normalization.
-- `price_gbp`: normalized numeric value in GBP, parsed from the price string.
-- `availability_text`: stock availability text when present.
-- `rating_text`: star rating text such as `One`, `Two`, `Three`, `Four`, or `Five` when present.
-- `description`: extracted description text when present.
-- `source_page`: catalogue page from which the book was discovered.
-- `fetched_at`: UTC timestamp when the record was fetched or normalized.
+## Run report
 
-## Politeness rules
+The run report contains:
 
-The scraper follows the project’s actual politeness controls from the code:
+- `start_time`: UTC start timestamp
+- `duration`: elapsed time in seconds when produced by the programmatic runner
+- `pages_fetched`: pages fetched from the network
+- `cache_hits`: pages loaded from local cache
+- `valid_records`: records written to `books.json`
+- `invalid_records`: records rejected during normalization
+- `failed_pages`: detail pages that could not be fetched or processed
 
-- User-Agent: `FlyRankInternshipA9/1.0 (+https://github.com/)`
-- Request delay: `0.5` seconds between requests
-- Timeout: `5` seconds per request
-- Caching: cached HTML is written to the local `cache/` directory, and a page is loaded from cache before it is fetched again
-- Avoiding repeated requests: URLs are deduplicated during discovery, and the scraper intentionally stops after the first 3 catalogue pages
+The scraper continues after an individual detail-page failure. A catalogue discovery failure is fatal because the scraper cannot determine which detail pages to visit.
 
-## Limitation
+### Sample evidence
 
-This scraper intentionally only processes the first 3 catalogue pages, so it cannot discover or normalize books beyond that limited sample of the site.
-
-## Real run report
-
-This is the actual `output/runreport.json` generated by the scraper in the current project state:
+This is a real `output/run-report.json` produced by the scraper:
 
 ```json
 {
@@ -90,24 +179,74 @@ This is the actual `output/runreport.json` generated by the scraper in the curre
   "failed_pages": 0,
   "invalid_records": 0,
   "pages_fetched": 0,
-  "start_time": "2026-08-31T19:11:18Z",
+  "start_time": "2026-09-10T18:18:18Z",
   "valid_records": 60
 }
 ```
 
-## Why no browser?
+The JSON evidence files are committed; cached HTML pages are not.
 
-This assignment does not need a browser because the data is already present in the HTML returned by the server, so using a browser would only add unnecessary cost and complexity.
+## Politeness and scope
 
-## Ethics note
+The current implementation uses these controls:
 
-This project uses official public site data only, avoids bypassing logins or paywalls, and collects only the fields required for the assignment. That keeps the scraper aligned with the expected scope and avoids unnecessary data collection.
+- Target: `https://books.toscrape.com/`
+- Maximum catalogue pages: 3
+- Request delay: 0.5 seconds
+- Request timeout: 5 seconds
+- User-Agent: `FlyRankInternshipA9/1.0 (+https://github.com/)`
+- Retry policy: one retry for timeouts and HTTP 5xx responses
+- No retry for HTTP 403 or 404 responses
+- Cached Books to Scrape pages are reused before making network requests
 
-## Expected outcome
+The expected sample is up to 60 books, based on 20 books per catalogue page. The exact result depends on source availability and parsing results.
 
-A fresh run of the scraper should generate:
+## Browser and ethics
 
-- `output/books.json` with 60 records
-- `output/runreport.json` with the actual execution summary
+This assignment needs no browser because the data is already in the HTML the server sends, so a browser would only add cost.
 
-The generated JSON is valid and intentionally includes the real run metadata reported by the scraper.
+Use an official API when one exists. Never bypass logins, paywalls, or blocks, and collect only the fields needed for the assignment.
+
+## Project layout
+
+```text
+scraper/
+|-- src/
+|   |-- __init__.py          Python package marker
+|   `-- main.py              Scraper, parsing, validation, and output logic
+|-- tests/                   Automated tests
+|-- cache/                   Generated cached HTML and fetch metadata
+|-- output/                  Generated JSON results and reports
+|-- requirements.txt         Runtime and test dependencies
+|-- stage5_check.py          Failure-survival checkpoint
+`-- README.md                Project documentation
+```
+
+## Troubleshooting
+
+### `ModuleNotFoundError`
+
+Make sure the virtual environment is activated or use its interpreter explicitly:
+
+```powershell
+& .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+### The run returns cached data
+
+Delete the contents of `cache/` and run the clean-cache command above.
+
+### Network or HTTP errors
+
+Check your internet connection and rerun the command. A failed individual detail page is recorded in `output/errors.json`; the rest of the run can still succeed.
+
+### Selectors no longer match
+
+The scraper is tailored to the current Books to Scrape HTML structure. If the site markup changes, update the extraction functions in `src/main.py` and add or update focused tests.
+
+## Limitations
+
+- There is no command-line configuration interface; the target, page limit, timeout, and delay are constants in `src/main.py`.
+- The scraper is not a general-purpose crawler.
+- Prices are stored as floating-point GBP values for this learning project; financial applications should use a decimal type.
+- The project does not use a browser because the required data is available in the server HTML.
